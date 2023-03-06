@@ -4,32 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/gob"
+	"fmt"
 	"io"
 )
-
-type bodyType int
-
-const (
-	_             = 0
-	bodyType_ping = 1 << (iota - 1)
-	bodyType_pong
-	bodyType_req //请求
-	bodyType_res //响应
-)
-
-type body struct {
-	EventType
-	BodyCount int64
-	Bytes     []byte
-	Error     string // error
-}
-
-// 解码器
-type Codec interface {
-	Read(*body) error
-	Write(EventType, ...any) error
-	Close() error
-}
 
 type gobCodeC struct {
 	conn io.ReadWriter
@@ -49,23 +26,14 @@ func NewGobCodec(conn io.ReadWriter) *gobCodeC {
 	}
 }
 
-func (this *gobCodeC) Read(b *body) error {
+func (this *gobCodeC) Read(b *msg) error {
 	return this.dec.Decode(b)
 }
 
-func (this *gobCodeC) Write(eventType EventType, args ...any) (err error) {
-	b := &body{
-		EventType: eventType,
-		BodyCount: int64(len(args)),
-	}
-	var buf bytes.Buffer
-	paramEncoder := gob.NewEncoder(&buf)
-	for _, arg := range args {
-		paramEncoder.Encode(arg)
-	}
-	b.Bytes = buf.Bytes()
-	err = this.enc.Encode(b)
+func (this *gobCodeC) Write(m *msg) (err error) {
+	err = this.enc.Encode(m)
 	if err != nil {
+		err = fmt.Errorf("msg type:%v,eventType:%s,err:%w", m.T, m.EventType, err)
 		return
 	}
 	return this.encbuf.Flush()

@@ -23,7 +23,7 @@ func TestGobcodec(t *testing.T) {
 	if err := codec.Write("sayhello", 1, "20", 3, "40", 5, "60", data); err != nil {
 		t.Error(err)
 	}
-	var h body
+	var h msg
 	if err := codec.Read(&h); err != nil {
 		t.Error(err)
 	}

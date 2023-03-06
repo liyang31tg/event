@@ -2,28 +2,36 @@ package event
 
 import (
 	"bytes"
+	"encoding/gob"
 	"fmt"
 	"reflect"
 	"sync"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 type client struct {
-	events map[EventType][]*methodType
-	mutex  sync.Mutex //protect following
-	CreateCodeC
-	codec    Codec
-	starting bool //是否开启
-	shutdown bool // server shutdown
+	events     map[EventType][]*methodType
+	reqmutex   sync.Mutex // 保证流的正确性
+	mutex      sync.Mutex // 保护client的状态
+	codecFunc  CreateCodecFunc
+	codec      Codec
+	seq        uint64
+	pending    map[uint64]*call
+	connecting bool // client is connecting
+	prepared   bool // server prepared
+	shutdown   bool // server shutdown
 }
 
-type CreateCodeC func() Codec
+type CreateCodecFunc func() (Codec, error)
 
-func NewClient(createcodecf CreateCodeC) *client {
+func NewClient(cf CreateCodecFunc) *client {
 	c := &client{
-		events:      make(map[EventType][]*methodType),
-		CreateCodeC: createcodecf,
-		codec:       nil,
+		events:    make(map[EventType][]*methodType),
+		pending:   make(map[uint64]*call),
+		codecFunc: cf,
+		codec:     nil,
 	}
 	go c.keepAlive()
 	go c.input()
@@ -32,24 +40,47 @@ func NewClient(createcodecf CreateCodeC) *client {
 
 func (this *client) keepAlive() {
 	for {
+		this.mutex.Lock()
+		if !this.connecting {
+			codec, err := this.codecFunc()
+			if err != nil {
+				logrus.Error(err)
+				this.mutex.Unlock()
+				time.Sleep(1 * time.Millisecond)
+				continue
+			} else {
+				this.connecting = true
+				this.codec = codec
+				this.mutex.Unlock()
+				continue
+			}
+		} else { //heart
+			if err := this.EmitAsync(msgType_ping, ""); err != nil {
+				logrus.Error(err)
+			}
+			time.Sleep(30 * time.Second)
+		}
 
-		time.Sleep(1 * time.Second)
 	}
 
 }
 
 func (this *client) input() {
-	for {
-		var body body
-		err := this.codec.Read(&body)
+	var err error
+	for err == nil {
+		var msg msg
+		err = this.codec.Read(&msg)
 		if err != nil {
 			break
 		}
-		go this.call(&body)
+		go this.call(&msg)
 	}
+	this.mutex.Lock()
+	this.prepared = false
+	this.mutex.Unlock()
 }
 
-func (this *client) call(body *body) {
+func (this *client) call(body *msg) {
 
 }
 
@@ -73,34 +104,60 @@ func (this *client) On(t EventType, Func any) error {
 	return nil
 }
 
-// 触发事件
-func (this *client) GoEmit(t EventType, args ...any) error {
+func (this *client) EmitAsync(t msgType, eventType EventType, args ...any) *call {
+	m := &msg{
+		T:         t,
+		EventType: eventType,
+		BodyCount: int8(len(args)),
+	}
+	var buf bytes.Buffer
+	paramEncoder := gob.NewEncoder(&buf)
+	for _, arg := range args {
+		paramEncoder.Encode(arg)
+	}
+	m.Bytes = buf.Bytes()
+	call := NewCall(m)
+	this.send(call)
+	return call
+}
+
+func (this *client) Emit(t msgType, eventType EventType, args ...any) error {
+	call := <-this.EmitAsync(t, eventType, args...).Done
+	return call.Error
+}
+
+func (this *client) send(call *call) {
+	this.reqmutex.Lock()
+	defer this.reqmutex.Unlock()
+
 	this.mutex.Lock()
-	defer this.mutex.Unlock()
-	if this.starting {
-		return this.codec.Write(t, args...)
-	} else {
-		return fmt.Errorf("client is not start")
+	if !this.prepared || this.shutdown {
+		this.mutex.Unlock()
+		call.Error = fmt.Errorf("client is prepared:%v,shutdown:%v", this.prepared, this.shutdown)
+		call.done()
+		return
+	}
+	seq := this.seq
+	seq++
+	this.pending[seq] = call
+	this.seq = seq
+	this.mutex.Unlock()
+	call.msg.Seq = seq
+	err := this.codec.Write(call.msg)
+	if err != nil {
+		this.mutex.Lock()
+		call = this.pending[seq]
+		delete(this.pending, seq)
+		this.mutex.Unlock()
+		if call != nil {
+			call.Error = err
+			call.done()
+		}
 	}
 }
 
-// default
-func newLocalClient() *client {
-	c := NewClient(func() Codec {
-		var buf bytes.Buffer
-		return NewGobCodec(&buf)
-	})
-	c.starting = true
-	c.codec = c.CreateCodeC()
-	return c
-}
-
-var defalutLocalClient = newLocalClient()
-
-func On(t EventType, Func any) error {
-	return defalutLocalClient.On(t, Func)
-}
-
-func GoEmit(t EventType, args ...any) error {
-	return defalutLocalClient.GoEmit(t, args...)
-}
+var defaultClient = NewClient(func() (Codec, error) {
+	var buf bytes.Buffer
+	codec := NewGobCodec(&buf)
+	return codec, nil
+})
