@@ -4,8 +4,13 @@ import (
 	"reflect"
 )
 
-type methodType struct {
-	method   reflect.Value
-	ArgType  []reflect.Type
-	ArgCount int
+type method struct {
+	function reflect.Value
+	argsType []*ArgType
+	argCount int
+}
+
+type ArgType struct {
+	isPointer bool
+	at        reflect.Type
 }

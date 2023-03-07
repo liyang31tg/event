@@ -9,8 +9,8 @@ import (
 type msgType int
 
 const (
-	_                    = 0
-	msgType_ping msgType = 1 << (iota - 1) //心跳维护
+	msgType_invalid msgType = 0
+	msgType_ping    msgType = 1 << (iota - 1) //心跳维护
 	msgType_pong
 	msgType_prepared //服务端已经准备好了
 	msgType_on       //监听事件
@@ -19,6 +19,7 @@ const (
 )
 
 var msgTypeString = map[msgType]string{
+	msgType_invalid:  "invalid",
 	msgType_ping:     "Ping",
 	msgType_pong:     "Pong",
 	msgType_prepared: "Prepared",
