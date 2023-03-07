@@ -2,21 +2,21 @@ package event
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/gob"
 	"fmt"
 	"io"
 )
 
 type gobCodeC struct {
-	conn io.ReadWriter
+	conn io.ReadWriteCloser
 	//codec
 	encbuf *bufio.Writer
 	enc    *gob.Encoder
 	dec    *gob.Decoder
 }
 
-func NewGobCodec(conn io.ReadWriter) *gobCodeC {
+// 只支持网络连接，buffer会出问题
+func NewGobCodec(conn io.ReadWriteCloser) *gobCodeC {
 	buf := bufio.NewWriter(conn)
 	return &gobCodeC{
 		conn:   conn,
@@ -26,11 +26,11 @@ func NewGobCodec(conn io.ReadWriter) *gobCodeC {
 	}
 }
 
-func (this *gobCodeC) Read(b *msg) error {
+func (this *gobCodeC) Read(b *Msg) error {
 	return this.dec.Decode(b)
 }
 
-func (this *gobCodeC) Write(m *msg) (err error) {
+func (this *gobCodeC) Write(m *Msg) (err error) {
 	err = this.enc.Encode(m)
 	if err != nil {
 		err = fmt.Errorf("msg type:%v,eventType:%s,err:%w", m.T, m.EventType, err)
@@ -40,10 +40,8 @@ func (this *gobCodeC) Write(m *msg) (err error) {
 }
 
 func (this *gobCodeC) Close() error {
-	if v, ok := this.conn.(io.ReadWriteCloser); ok {
-		return v.Close()
-	} else if v, ok := this.conn.(*bytes.Buffer); ok {
-		v.Reset()
+	if this == nil {
+		return nil
 	}
-	return nil
+	return this.conn.Close()
 }

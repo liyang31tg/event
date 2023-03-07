@@ -45,7 +45,7 @@ func NewClient(cf CreateCodecFunc) *client {
 		codecFunc:     cf,
 		codec:         nil,
 		checkInterval: 1,
-		heartInterval: 30,
+		heartInterval: 5,
 	}
 	go c.keepAlive()
 	return c
@@ -88,6 +88,7 @@ func (this *client) keepAlive() {
 
 func (this *client) serve(codec Codec) {
 	this.mutex.Lock()
+	logrus.Info("hasconnection")
 	this.connecting = true
 	this.codec = codec
 	this.mutex.Unlock()
@@ -95,6 +96,7 @@ func (this *client) serve(codec Codec) {
 }
 
 func (this *client) stop() {
+	logrus.Error("stop")
 	if this.connecting {
 		this.codec.Close()
 		this.codec = nil
@@ -111,10 +113,16 @@ func (this *client) stopHeart() {
 
 }
 
+func (this *client) printCall() {
+	for index, msg := range this.pending {
+		logrus.Info("index:%d,msg:%+v\n", index, *msg)
+	}
+}
+
 func (this *client) input(codec Codec) {
 	var err error
 	for err == nil {
-		var msg msg
+		var msg Msg
 		err = codec.Read(&msg)
 		if err != nil {
 			err = errors.New("reading error body1: " + err.Error())
@@ -137,14 +145,17 @@ func (this *client) input(codec Codec) {
 				call.done()
 			}
 		default:
-
 		}
 	}
 	this.reqmutex.Lock()
 	this.mutex.Lock()
 	for _, call := range this.pending {
+		logrus.Infof("%+v", *call.msg)
 		call.Error = err
 		call.done()
+	}
+	if err != nil {
+		logrus.Error(err)
 	}
 	this.stop()
 	this.mutex.Unlock()
@@ -172,8 +183,8 @@ func (this *client) parse(data []byte, argCount int, m *method) []reflect.Value 
 	return argsValue
 }
 
-func (this *client) call(codec Codec, body *msg) {
-	res := &msg{
+func (this *client) call(codec Codec, body *Msg) {
+	res := &Msg{
 		T:         msgType_res,
 		Seq:       body.Seq,
 		EventType: body.EventType,
@@ -254,7 +265,7 @@ func (this *client) EmitAsync(t msgType, eventType EventType, args ...any) (call
 }
 
 func (this *client) emit_async(t msgType, eventType EventType, args ...any) (call *call) {
-	m := &msg{
+	m := &Msg{
 		T:         t,
 		EventType: eventType,
 		BodyCount: int8(len(args)),
@@ -319,9 +330,3 @@ func (this *client) send(call *call) {
 		}
 	}
 }
-
-var defaultClient = NewClient(func() (Codec, error) {
-	var buf bytes.Buffer
-	codec := NewGobCodec(&buf)
-	return codec, nil
-})

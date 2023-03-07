@@ -36,7 +36,7 @@ func (this msgType) String() string {
 	}
 }
 
-type msg struct {
+type Msg struct {
 	T   msgType
 	Seq uint64
 	EventType
@@ -46,12 +46,12 @@ type msg struct {
 }
 
 type call struct {
-	msg   *msg
+	msg   *Msg
 	Done  chan *call
 	Error error
 }
 
-func NewCall(m *msg) *call {
+func NewCall(m *Msg) *call {
 	if m == nil {
 		return nil
 	}
