@@ -133,7 +133,7 @@ func (this *client) input(codec Codec) {
 		case msgType_req:
 			go this.call(codec, &msg)
 		case msgType_res:
-			seq := msg.Seq
+			seq := msg.LocalSeq
 			this.mutex.Lock()
 			call := this.pending[seq]
 			delete(this.pending, seq)
@@ -186,7 +186,8 @@ func (this *client) parse(data []byte, argCount int, m *method) []reflect.Value 
 func (this *client) call(codec Codec, body *Msg) {
 	res := &Msg{
 		T:         msgType_res,
-		Seq:       body.Seq,
+		ServerSeq: body.ServerSeq,
+		LocalSeq:  body.LocalSeq,
 		EventType: body.EventType,
 	}
 	var err error
@@ -312,11 +313,11 @@ func (this *client) send(call *call) {
 	}
 	codec = this.codec
 	seq := this.seq
-	seq++
+	seq = IncSeqID(seq)
 	this.pending[seq] = call
 	this.seq = seq
 	this.mutex.Unlock()
-	call.msg.Seq = seq
+	call.msg.LocalSeq = seq
 	err := codec.Write(call.msg)
 	if err != nil {
 		this.mutex.Lock()

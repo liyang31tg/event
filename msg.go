@@ -37,8 +37,9 @@ func (this msgType) String() string {
 }
 
 type Msg struct {
-	T   msgType
-	Seq uint64
+	T         msgType
+	ServerSeq uint64 //服务器请求的序号 ,响应的时候用
+	LocalSeq  uint64 //本地请求序号
 	EventType
 	BodyCount int8 // 超过这个数就是自讨苦吃
 	Bytes     []byte

@@ -1,4 +1,4 @@
-module github.com/liyang31tg/event
+module eventMgr
 
 go 1.20
 
