@@ -1,10 +1,12 @@
-package event
+package codec
 
 import (
 	"bufio"
 	"encoding/gob"
 	"fmt"
 	"io"
+
+	"github.com/liyang31tg/event/msg"
 )
 
 type gobCodeC struct {
@@ -26,11 +28,11 @@ func NewGobCodec(conn io.ReadWriteCloser) *gobCodeC {
 	}
 }
 
-func (this *gobCodeC) Read(b *Msg) error {
+func (this *gobCodeC) Read(b *msg.Msg) error {
 	return this.dec.Decode(b)
 }
 
-func (this *gobCodeC) Write(m *Msg) (err error) {
+func (this *gobCodeC) Write(m *msg.Msg) (err error) {
 	err = this.enc.Encode(m)
 	if err != nil {
 		err = fmt.Errorf("msg type:%v,eventType:%s,err:%w", m.T, m.EventType, err)

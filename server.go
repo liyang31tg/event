@@ -2,11 +2,13 @@ package event
 
 import (
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/liyang31tg/event/codec"
 	"github.com/liyang31tg/event/msg"
 	"github.com/liyang31tg/event/options"
 	"github.com/sirupsen/logrus"
@@ -36,22 +38,31 @@ type serverReqMeta struct {
 	msg.EventType
 }
 
-func NewServer(cf options.CreateServerCodecFunc) *server {
+func NewServer(opts ...*options.ServerOptions) *server {
 	c := &server{
-		codecFunc:  cf,
 		services:   map[uint64]*service{},
 		monitor:    map[msg.EventType]map[uint64]struct{}{},
 		reqTimeOut: 10,
 		reqMetas:   map[uint64]*serverReqMeta{},
+	}
+
+	opt := options.Server().SetCodecFunc(func(conn io.ReadWriteCloser) (codec.Codec, error) {
+		return codec.NewGobCodec(conn), nil
+	}).Merge(opts...)
+	if opt.CodecFunc != nil {
+		c.codecFunc = *opt.CodecFunc
+	}
+	if opt.ReqTimeout != nil {
+		c.reqTimeOut = *opt.ReqTimeout
 	}
 	go c.checkTimeOut()
 	return c
 }
 
 //url:port
-func (this *server) Listen(url string) {
+func (this *server) Listen(url string) error {
 	if this == nil {
-		return
+		return errors.New("server is nil")
 	}
 	listen, err := net.Listen("tcp", url)
 	if err != nil {
@@ -115,21 +126,21 @@ func (this *server) close(id uint64) {
 }
 
 // case msgType_on, msgType_req, msgType_res:
-func (this *server) handle(serviceID uint64, msg *Msg) {
-	switch msg.T {
-	case msgType_on:
-		this.on(serviceID, msg)
-	case msgType_req:
-		this.req(serviceID, msg)
-	case msgType_res:
-		this.res(serviceID, msg)
+func (this *server) handle(serviceID uint64, frame *msg.Msg) {
+	switch frame.T {
+	case msg.MsgType_on:
+		this.on(serviceID, frame)
+	case msg.MsgType_req:
+		this.req(serviceID, frame)
+	case msg.MsgType_res:
+		this.res(serviceID, frame)
 	default:
-		logrus.Infof("丢弃：%d,msg:%+v\n", serviceID, msg)
+		logrus.Infof("丢弃：%d,msg:%+v\n", serviceID, frame)
 	}
 
 }
 
-func (this *server) on(serviceID uint64, msg *Msg) {
+func (this *server) on(serviceID uint64, msg *msg.Msg) {
 	logrus.Info("server on ", serviceID, msg)
 	et := msg.EventType
 	if et == "" {
@@ -147,13 +158,13 @@ func (this *server) on(serviceID uint64, msg *Msg) {
 	logrus.Error(err)
 }
 
-func (this *server) req(serviceID uint64, msg *Msg) {
+func (this *server) req(serviceID uint64, msg *msg.Msg) {
 	et := msg.EventType
 	if et == "" {
 		return
 	}
 	this.mutex.Lock()
-	reqSeq := IncSeqID(this.reqSeq)
+	reqSeq := incSeqID(this.reqSeq)
 	this.reqSeq = reqSeq
 	msg.ServerSeq = reqSeq
 	if v, ok := this.monitor[et]; ok {
@@ -182,7 +193,7 @@ func (this *server) req(serviceID uint64, msg *Msg) {
 		this.mutex.Unlock()
 	}
 }
-func (this *server) res(serviceID uint64, msg *Msg) {
+func (this *server) res(serviceID uint64, msg *msg.Msg) {
 	reqSeq := msg.ServerSeq
 	this.mutex.Lock()
 	reqMeta, ok := this.reqMetas[reqSeq]
@@ -211,7 +222,7 @@ func (this *server) res(serviceID uint64, msg *Msg) {
 	}
 }
 
-func (this *server) write(serviceID uint64, msg *Msg) (err error) {
+func (this *server) write(serviceID uint64, msg *msg.Msg) (err error) {
 	this.mutex.Lock()
 	if service, ok := this.services[serviceID]; ok {
 		this.mutex.Unlock()
@@ -227,7 +238,7 @@ func (this *server) write(serviceID uint64, msg *Msg) (err error) {
 	return
 }
 
-func (this *server) writeWithoutLock(serviceID uint64, msg *Msg) (err error) {
+func (this *server) writeWithoutLock(serviceID uint64, msg *msg.Msg) (err error) {
 	if service, ok := this.services[serviceID]; ok {
 		logrus.Info("write", msg)
 		if err = service.write(msg); err == nil {
@@ -246,11 +257,11 @@ type service struct {
 	id     uint64
 	done   chan struct{}
 	server *server
-	codec  Codec
+	codec  codec.Codec
 	mutex  sync.Mutex //读是单线程，写加锁
 }
 
-func newService(server *server, id uint64, codec Codec) *service {
+func newService(server *server, id uint64, codec codec.Codec) *service {
 	s := &service{
 		id:     id,
 		server: server,
@@ -264,25 +275,25 @@ func (this *service) serve() {
 		return
 	}
 	var err error
-	err = this.write(&Msg{T: msgType_prepared})
+	err = this.write(&msg.Msg{T: msg.MsgType_prepared})
 	for err == nil {
 		select {
 		case <-this.done:
 			err = errors.New("stop service")
 		default:
-			var msg Msg
-			err = this.read(&msg)
+			var frame msg.Msg
+			err = this.read(&frame)
 			if err != nil {
 				continue
 			}
-			logrus.Infof("receive msg:%+v\n", msg)
-			switch msg.T {
-			case msgType_ping:
-				err = this.write(&Msg{T: msgType_pong})
-			case msgType_on, msgType_req, msgType_res:
-				go this.server.handle(this.id, &msg)
+			logrus.Infof("receive msg:%+v\n", frame)
+			switch frame.T {
+			case msg.MsgType_ping:
+				err = this.write(&msg.Msg{T: msg.MsgType_pong})
+			case msg.MsgType_on, msg.MsgType_req, msg.MsgType_res:
+				go this.server.handle(this.id, &frame)
 			default:
-				logrus.Infof("invalid msg:%+v", msg)
+				logrus.Infof("invalid msg:%+v", frame)
 			}
 		}
 	}
@@ -294,11 +305,11 @@ func (this *service) close() error {
 	return this.codec.Close()
 }
 
-func (this *service) read(msg *Msg) error {
+func (this *service) read(msg *msg.Msg) error {
 	return this.codec.Read(msg)
 }
 
-func (this *service) write(msg *Msg) error {
+func (this *service) write(msg *msg.Msg) error {
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
 	err := this.codec.Write(msg)

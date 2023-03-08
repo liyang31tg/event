@@ -41,26 +41,48 @@ type client struct {
 	connecting    bool          // client is connecting
 }
 
-func Dial(url string, cf options.CreateClientCodecFunc) (*client, error) {
-	conn, err := net.Dial("tcp", url)
-	if err != nil {
-		return nil, err
-	}
-	codec, err := cf(conn)
-	if err != nil {
-		return nil, err
-	}
+func Dial(url string, opts ...options.ClientOptions) (*client, error) {
 	c := &client{
 		url:           url,
 		events:        make(map[msg.EventType][]*method),
 		pending:       make(map[uint64]*msg.Call),
-		codecFunc:     cf,
-		codec:         codec,
 		connecting:    true,
 		checkInterval: 1,
 		heartInterval: 5,
 	}
-	c.serve(codec)
+	conn, err := net.Dial("tcp", url)
+	if err != nil {
+		return nil, err
+	}
+	//合并属性
+	opt := options.Client().SetCodecFunc(func(conn io.ReadWriteCloser) (codec.Codec, error) {
+		return codec.NewGobCodec(conn), nil
+	})
+
+	//属性设置开始
+	if opt.CodecFunc != nil {
+		c.codecFunc = *opt.CodecFunc
+		codec, err := c.codecFunc(conn)
+		if err != nil {
+			return nil, err
+		}
+		c.codec = codec
+	}
+
+	if opt.CheckInterval != nil {
+		c.checkInterval = *opt.CheckInterval
+	}
+
+	if opt.HeartInterval != nil {
+		c.heartInterval = *opt.HeartInterval
+	}
+
+	if opt.IsStopHeart != nil {
+		c.isStopHeart = *opt.IsStopHeart
+	}
+	//属性设置结束
+
+	c.serve(c.codec)
 	go c.keepAlive()
 	return c, nil
 
@@ -342,7 +364,7 @@ func (this *client) send(call *msg.Call) {
 	}
 	codec = this.codec
 	seq := this.seq
-	seq = IncSeqID(seq)
+	seq = incSeqID(seq)
 	this.pending[seq] = call
 	this.seq = seq
 	this.mutex.Unlock()
