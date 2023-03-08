@@ -2,20 +2,21 @@ package event
 
 import (
 	"errors"
-	"io"
 	"net"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/liyang31tg/event/msg"
+	"github.com/liyang31tg/event/options"
 	"github.com/sirupsen/logrus"
 )
 
 type server struct {
-	codecFunc CreateServerCodecFunc
+	codecFunc options.CreateServerCodecFunc
 	mutex     sync.Mutex
 	seq       uint64
-	monitor   map[EventType]map[uint64]struct{}
+	monitor   map[msg.EventType]map[uint64]struct{}
 	services  map[uint64]*service
 
 	reqTimeOut time.Duration //请求超时
@@ -32,16 +33,14 @@ type serverReqMeta struct {
 	Time     time.Time
 	//clien info
 	localSeq uint64
-	EventType
+	msg.EventType
 }
 
-type CreateServerCodecFunc func(conn io.ReadWriteCloser) (Codec, error)
-
-func NewServer(cf CreateServerCodecFunc) *server {
+func NewServer(cf options.CreateServerCodecFunc) *server {
 	c := &server{
 		codecFunc:  cf,
 		services:   map[uint64]*service{},
-		monitor:    map[EventType]map[uint64]struct{}{},
+		monitor:    map[msg.EventType]map[uint64]struct{}{},
 		reqTimeOut: 10,
 		reqMetas:   map[uint64]*serverReqMeta{},
 	}
@@ -87,14 +86,14 @@ func (this *server) checkTimeOut() {
 		logrus.Info("client count:", len(this.services))
 		for _, reqMeta := range this.reqMetas {
 			if time.Now().Sub(reqMeta.Time) > this.reqTimeOut*time.Second { //
-				msg := &Msg{
-					T:         msgType_res,
+				gotMsg := &msg.Msg{
+					T:         msg.MsgType_res,
 					ServerSeq: reqMeta.reqSeq,
 					LocalSeq:  reqMeta.localSeq,
 					EventType: reqMeta.EventType,
 					Error:     errTimeout.Error(),
 				}
-				this.writeWithoutLock(reqMeta.senderID, msg)
+				this.writeWithoutLock(reqMeta.senderID, gotMsg)
 				delete(this.reqMetas, reqMeta.reqSeq)
 			}
 		}

@@ -1,3 +1,3 @@
-package event
+package msg
 
 type EventType string
