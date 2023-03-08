@@ -55,9 +55,11 @@ func Dial(url string, cf CreateClientCodecFunc) (*client, error) {
 		pending:       make(map[uint64]*call),
 		codecFunc:     cf,
 		codec:         codec,
+		connecting:    true,
 		checkInterval: 1,
 		heartInterval: 5,
 	}
+	c.serve(codec)
 	go c.keepAlive()
 	return c, nil
 
@@ -124,10 +126,10 @@ func (this *client) stop() {
 	this.connecting = false
 }
 
-func (this *client) stopHeart() {
+func (this *client) StopHeart() {
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
-	this.isStopHeart = false
+	this.isStopHeart = true
 
 }
 
@@ -146,11 +148,12 @@ func (this *client) input(codec Codec) {
 			err = errors.New("reading error body1: " + err.Error())
 			break
 		}
+		logrus.Infof("client receive:%+v", msg)
 		switch msg.T {
 		case msgType_ping, msgType_pong:
 		case msgType_req:
 			go this.call(codec, &msg)
-		case msgType_res:
+		case msgType_res, msgType_on:
 			seq := msg.LocalSeq
 			this.mutex.Lock()
 			call := this.pending[seq]
@@ -187,13 +190,17 @@ func (this *client) parse(data []byte, argCount int, m *method) []reflect.Value 
 	dec := gob.NewDecoder(bytes.NewReader(dstData))
 	for i := 0; i < m.argCount; i++ {
 		argType := m.argsType[i]
-		argValue := reflect.New(argType.at)
+		at := argType.at
+		if argType.isPointer {
+			at = at.Elem()
+		}
+		argValue := reflect.New(at)
 		if i < argCount {
 			if err := dec.Decode(argValue.Interface()); err != nil {
 				logrus.Error(err)
 			}
 		}
-		if argType.isPointer {
+		if !argType.isPointer {
 			argValue = argValue.Elem()
 		}
 		argsValue[i] = argValue
@@ -276,7 +283,8 @@ func (this *client) On(t EventType, Func any) error {
 	events = append(events, mType)
 	this.events[t] = events
 	this.mutex.Unlock()
-	return nil
+
+	return this.emit(msgType_on, t)
 }
 
 func (this *client) EmitAsync(t msgType, eventType EventType, args ...any) (call *call) {
@@ -305,11 +313,13 @@ func (this *client) emit_async(t msgType, eventType EventType, args ...any) (cal
 		return
 	}
 	m.Bytes = buf.Bytes()
+	fmt.Printf("emit_async:%+v\n", m)
 	this.send(call)
 	return
 }
 
 func (this *client) emit(t msgType, eventType EventType, args ...any) error {
+	logrus.Info(t, eventType, args)
 	call := <-this.emit_async(t, eventType, args...).Done
 	return call.Error
 }

@@ -51,6 +51,9 @@ func NewServer(cf CreateServerCodecFunc) *server {
 
 //url:port
 func (this *server) Listen(url string) {
+	if this == nil {
+		return
+	}
 	listen, err := net.Listen("tcp", url)
 	if err != nil {
 		panic(err)
@@ -81,6 +84,7 @@ var errTimeout = errors.New("req timeout")
 func (this *server) checkTimeOut() {
 	for {
 		this.mutex.Lock()
+		logrus.Info("client count:", len(this.services))
 		for _, reqMeta := range this.reqMetas {
 			if time.Now().Sub(reqMeta.Time) > this.reqTimeOut*time.Second { //
 				msg := &Msg{
@@ -91,6 +95,7 @@ func (this *server) checkTimeOut() {
 					Error:     errTimeout.Error(),
 				}
 				this.writeWithoutLock(reqMeta.senderID, msg)
+				delete(this.reqMetas, reqMeta.reqSeq)
 			}
 		}
 		this.mutex.Unlock()
@@ -101,6 +106,9 @@ func (this *server) checkTimeOut() {
 func (this *server) close(id uint64) {
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
+	for _, m := range this.monitor {
+		delete(m, id)
+	}
 	if service, ok := this.services[id]; ok {
 		delete(this.services, id)
 		service.close()
@@ -123,6 +131,7 @@ func (this *server) handle(serviceID uint64, msg *Msg) {
 }
 
 func (this *server) on(serviceID uint64, msg *Msg) {
+	logrus.Info("server on ", serviceID, msg)
 	et := msg.EventType
 	if et == "" {
 		return
@@ -135,6 +144,8 @@ func (this *server) on(serviceID uint64, msg *Msg) {
 		v = map[uint64]struct{}{serviceID: {}}
 		this.monitor[et] = v
 	}
+	err := this.writeWithoutLock(serviceID, msg)
+	logrus.Error(err)
 }
 
 func (this *server) req(serviceID uint64, msg *Msg) {
@@ -158,12 +169,14 @@ func (this *server) req(serviceID uint64, msg *Msg) {
 		}
 		if isDone {
 			this.mutex.Lock()
-			this.reqMetas[reqSeq] = &serverReqMeta{
+			reqMeta := &serverReqMeta{
 				senderID: serviceID,
 				reqSeq:   reqSeq,
 				reqCount: reqCount,
 				Time:     time.Now(),
 			}
+			this.reqMetas[reqSeq] = reqMeta
+			logrus.Infof("broadcast:%+v\n", reqMeta)
 			this.mutex.Unlock()
 		}
 	} else {
@@ -181,6 +194,7 @@ func (this *server) res(serviceID uint64, msg *Msg) {
 			reqMeta.existErr = true
 		}
 		reqMeta.errs = append(reqMeta.errs, msg.Error)
+		logrus.Infof("server receive %+v,meta:%+v", msg, reqMeta)
 		this.mutex.Unlock()
 		if leftCount == 0 { //res
 			if reqMeta.existErr {
@@ -189,6 +203,9 @@ func (this *server) res(serviceID uint64, msg *Msg) {
 			if err := this.write(reqMeta.senderID, msg); err != nil {
 				logrus.Error("res senderID:%d,msg:%+v", reqMeta.senderID, msg)
 			}
+			this.mutex.Lock()
+			delete(this.reqMetas, reqSeq)
+			this.mutex.Unlock()
 		}
 	} else {
 		this.mutex.Unlock()
@@ -205,6 +222,7 @@ func (this *server) write(serviceID uint64, msg *Msg) (err error) {
 			this.close(serviceID)
 		}
 	} else {
+		//err = fmt.Errorf("serviceID:%d is not exits", serviceID)
 		this.mutex.Unlock()
 	}
 	return
@@ -212,7 +230,9 @@ func (this *server) write(serviceID uint64, msg *Msg) (err error) {
 
 func (this *server) writeWithoutLock(serviceID uint64, msg *Msg) (err error) {
 	if service, ok := this.services[serviceID]; ok {
+		logrus.Info("write", msg)
 		if err = service.write(msg); err == nil {
+			logrus.Info("write1", msg)
 			return
 		} else {
 			this.close(serviceID)
@@ -256,6 +276,7 @@ func (this *service) serve() {
 			if err != nil {
 				continue
 			}
+			logrus.Infof("receive msg:%+v\n", msg)
 			switch msg.T {
 			case msgType_ping:
 				err = this.write(&Msg{T: msgType_pong})
@@ -267,7 +288,7 @@ func (this *service) serve() {
 		}
 	}
 	this.server.close(this.id)
-	logrus.Errorf("service id:%d is die\n", this.id)
+	logrus.Errorf("service id:%d is die,err:%v\n", this.id, err)
 }
 
 func (this *service) close() error {
