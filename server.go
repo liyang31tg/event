@@ -50,7 +50,7 @@ func NewServer(cf CreateServerCodecFunc) *server {
 }
 
 //url:port
-func (this *server) listen(url string) {
+func (this *server) Listen(url string) {
 	listen, err := net.Listen("tcp", url)
 	if err != nil {
 		panic(err)

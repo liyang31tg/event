@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"reflect"
 	"sync"
 	"time"
@@ -23,9 +24,10 @@ func (this ServerError) Error() string {
 var errLocalWrite = errors.New("local Write err")
 
 type client struct {
+	url           string
 	reqmutex      sync.Mutex // 保证流的正确性
 	mutex         sync.Mutex // 保护client的状态
-	codecFunc     CreateCodecFunc
+	codecFunc     CreateClientCodecFunc
 	codec         Codec
 	events        map[EventType][]*method
 	seq           uint64
@@ -36,19 +38,29 @@ type client struct {
 	connecting    bool          // client is connecting
 }
 
-type CreateCodecFunc func() (Codec, error)
+type CreateClientCodecFunc func(conn io.ReadWriteCloser) (Codec, error)
 
-func NewClient(cf CreateCodecFunc) *client {
+func Dial(url string, cf CreateClientCodecFunc) (*client, error) {
+	conn, err := net.Dial("tcp", url)
+	if err != nil {
+		return nil, err
+	}
+	codec, err := cf(conn)
+	if err != nil {
+		return nil, err
+	}
 	c := &client{
+		url:           url,
 		events:        make(map[EventType][]*method),
 		pending:       make(map[uint64]*call),
 		codecFunc:     cf,
-		codec:         nil,
+		codec:         codec,
 		checkInterval: 1,
 		heartInterval: 5,
 	}
 	go c.keepAlive()
-	return c
+	return c, nil
+
 }
 
 func (this *client) keepAlive() {
@@ -56,9 +68,15 @@ func (this *client) keepAlive() {
 		this.mutex.Lock()
 		if !this.connecting {
 			this.mutex.Unlock()
-			codec, err := this.codecFunc()
+			conn, err := net.Dial("tcp", this.url)
 			if err != nil {
-				logrus.Error(err)
+				logrus.Errorf("dail err:%v\n", err)
+				time.Sleep(this.checkInterval * time.Second)
+				continue
+			}
+			codec, err := this.codecFunc(conn)
+			if err != nil {
+				logrus.Errorf("codec err:%v\n", err)
 				time.Sleep(this.checkInterval * time.Second)
 				continue
 			} else {
