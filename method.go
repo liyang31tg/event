@@ -6,11 +6,11 @@ import (
 
 type method struct {
 	function reflect.Value
-	argsType []*ArgType
+	argsType []*argType
 	argCount int
 }
 
-type ArgType struct {
+type argType struct {
 	isPointer bool
 	at        reflect.Type
 }

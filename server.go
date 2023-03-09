@@ -255,6 +255,7 @@ func (this *server) writeWithoutLock(serviceID uint64, msg *msg.Msg) (err error)
 
 type service struct {
 	id     uint64
+	name   string
 	done   chan struct{}
 	server *server
 	codec  codec.Codec
@@ -275,6 +276,11 @@ func (this *service) serve() {
 		return
 	}
 	var err error
+	var firstFrame msg.Msg
+	if err = this.read(&firstFrame); err == nil {
+		//TODO varify
+		this.name = firstFrame.Name
+	}
 	err = this.write(&msg.Msg{T: msg.MsgType_prepared})
 	for err == nil {
 		select {

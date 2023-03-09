@@ -12,6 +12,7 @@ const (
 	MsgType_invalid MsgType = 0
 	MsgType_ping    MsgType = 1 << (iota - 1) //心跳维护
 	MsgType_pong
+	MsgType_varify
 	MsgType_prepared //服务端已经准备好了
 	MsgType_on       //监听事件
 	MsgType_req      //请求
@@ -22,6 +23,7 @@ var msgTypeString = map[MsgType]string{
 	MsgType_invalid:  "invalid",
 	MsgType_ping:     "Ping",
 	MsgType_pong:     "Pong",
+	MsgType_varify:   "varify",
 	MsgType_prepared: "Prepared",
 	MsgType_on:       "on",
 	MsgType_req:      "req",
@@ -40,6 +42,7 @@ type Msg struct {
 	T         MsgType
 	ServerSeq uint64 //服务器请求的序号 ,响应的时候用
 	LocalSeq  uint64 //本地请求序号
+	Name      string
 	EventType
 	BodyCount int8 // 超过这个数就是自讨苦吃
 	Bytes     []byte

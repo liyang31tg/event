@@ -27,6 +27,7 @@ func (this ServerError) Error() string {
 var errLocalWrite = errors.New("local Write err")
 
 type client struct {
+	name          string
 	url           string
 	reqmutex      sync.Mutex // 保证流的正确性
 	mutex         sync.Mutex // 保护client的状态
@@ -60,13 +61,16 @@ func Dial(url string, opts ...options.ClientOptions) (*client, error) {
 	})
 
 	//属性设置开始
+	if opt.Name != nil {
+		c.name = *opt.Name
+	}
+	var codec codec.Codec
 	if opt.CodecFunc != nil {
 		c.codecFunc = *opt.CodecFunc
-		codec, err := c.codecFunc(conn)
+		codec, err = c.codecFunc(conn)
 		if err != nil {
 			return nil, err
 		}
-		c.codec = codec
 	}
 
 	if opt.CheckInterval != nil {
@@ -81,8 +85,10 @@ func Dial(url string, opts ...options.ClientOptions) (*client, error) {
 		c.isStopHeart = *opt.IsStopHeart
 	}
 	//属性设置结束
-
-	c.serve(c.codec)
+	if err := c.serve(codec); err != nil {
+		codec.Close()
+		return nil, err
+	}
 	go c.keepAlive()
 	return c, nil
 
@@ -105,7 +111,9 @@ func (this *client) keepAlive() {
 				time.Sleep(this.checkInterval * time.Second)
 				continue
 			} else {
-				this.serve(codec)
+				if err := this.serve(codec); err != nil {
+					logrus.Error(err)
+				}
 				continue
 			}
 		} else { //heart
@@ -129,13 +137,33 @@ func (this *client) keepAlive() {
 	}
 }
 
-func (this *client) serve(codec codec.Codec) {
+func (this *client) serve(codec codec.Codec) (err error) {
 	this.mutex.Lock()
-	logrus.Info("hasconnection")
+	defer func() {
+		if err != nil {
+			this.mutex.Unlock()
+		}
+	}()
+	if err = codec.Write(&msg.Msg{T: msg.MsgType_varify, Name: this.name}); err != nil {
+		return
+	}
+	var readFirstMsg msg.Msg
+	if err = codec.Read(&readFirstMsg); err != nil {
+		return
+	}
+	if readFirstMsg.T == msg.MsgType_prepared {
+		//重连挂载已经有的event
+		for event := range this.events {
+			if err = codec.Write(&msg.Msg{T: msg.MsgType_on, EventType: event}); err != nil {
+				return
+			}
+		}
+	}
 	this.connecting = true
 	this.codec = codec
 	this.mutex.Unlock()
 	go this.input(codec)
+	return
 }
 
 func (this *client) stop() {
@@ -247,13 +275,12 @@ func (this *client) call(codec codec.Codec, body *msg.Msg) {
 			if errInter != nil {
 				appendErr := errInter.(error)
 				if err != nil {
-					err = fmt.Errorf("%w|%w", err, appendErr)
+					err = fmt.Errorf("%w,%w", err, appendErr)
 				} else {
 					err = appendErr
 				}
 			}
 		}
-
 	} else {
 		err = fmt.Errorf("has no eventType:%v", body.EventType)
 	}
@@ -289,10 +316,10 @@ func (this *client) On(t msg.EventType, Func any) error {
 		return errors.New("return param must error")
 	}
 	inCount := rt.NumIn()
-	var argsType = make([]*ArgType, 0, inCount)
+	var argsType = make([]*argType, 0, inCount)
 	for i := 0; i < inCount; i++ {
 		at := rt.In(i)
-		argsType = append(argsType, &ArgType{isPointer: at.Kind() == reflect.Pointer, at: at})
+		argsType = append(argsType, &argType{isPointer: at.Kind() == reflect.Pointer, at: at})
 	}
 
 	rv := reflect.ValueOf(Func)
@@ -306,7 +333,6 @@ func (this *client) On(t msg.EventType, Func any) error {
 	events = append(events, mType)
 	this.events[t] = events
 	this.mutex.Unlock()
-
 	return this.emit(msg.MsgType_on, t)
 }
 

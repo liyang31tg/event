@@ -9,6 +9,7 @@ import (
 
 type CreateClientCodecFunc func(conn io.ReadWriteCloser) (codec.Codec, error)
 type ClientOptions struct {
+	Name          *string
 	CodecFunc     *CreateClientCodecFunc
 	CheckInterval *time.Duration
 	HeartInterval *time.Duration
@@ -17,6 +18,13 @@ type ClientOptions struct {
 
 func Client() *ClientOptions {
 	return new(ClientOptions)
+}
+func (this *ClientOptions) SetName(name string) *ClientOptions {
+	if this == nil {
+		return this
+	}
+	this.Name = &name
+	return this
 }
 
 func (this *ClientOptions) SetCodecFunc(cf CreateClientCodecFunc) *ClientOptions {
@@ -57,6 +65,9 @@ func (this *ClientOptions) Merge(opts ...*ClientOptions) *ClientOptions {
 }
 
 func (this *ClientOptions) merge(opt *ClientOptions) {
+	if opt.Name != nil {
+		this.Name = opt.Name
+	}
 	if opt.CodecFunc != nil {
 		this.CodecFunc = opt.CodecFunc
 	}
