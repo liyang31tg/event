@@ -29,11 +29,11 @@ var errLocalWrite = errors.New("local Write err")
 type client struct {
 	name          string
 	url           string
-	reqmutex      sync.Mutex // 保证流的正确性
-	mutex         sync.Mutex // 保护client的状态
+	reqmutex      sync.Mutex   // 保证流的正确性
+	mutex         sync.RWMutex // 保护client的状态
 	codecFunc     options.CreateClientCodecFunc
 	codec         codec.Codec
-	events        map[msg.EventType][]*method
+	events        map[*msg.EventTopic][]*method
 	seq           uint64
 	pending       map[uint64]*msg.Call
 	checkInterval time.Duration //链接检测
@@ -45,7 +45,7 @@ type client struct {
 func Dial(url string, opts ...options.ClientOptions) (*client, error) {
 	c := &client{
 		url:           url,
-		events:        make(map[msg.EventType][]*method),
+		events:        make(map[*msg.EventTopic][]*method),
 		pending:       make(map[uint64]*msg.Call),
 		connecting:    true,
 		checkInterval: 1,
@@ -153,11 +153,13 @@ func (this *client) serve(codec codec.Codec) (err error) {
 	}
 	if readFirstMsg.T == msg.MsgType_prepared {
 		//重连挂载已经有的event
+		this.mutex.RLock()
 		for event := range this.events {
-			if err = codec.Write(&msg.Msg{T: msg.MsgType_on, EventType: event}); err != nil {
+			if err = codec.Write(&msg.Msg{T: msg.MsgType_on, EventType: event.ET}); err != nil {
 				return
 			}
 		}
+		this.mutex.RUnlock()
 	}
 	this.connecting = true
 	this.codec = codec
@@ -260,33 +262,40 @@ func (this *client) parse(data []byte, argCount int, m *method) []reflect.Value 
 }
 
 func (this *client) call(codec codec.Codec, body *msg.Msg) {
+	et := body.EventType
 	res := &msg.Msg{
 		T:         msg.MsgType_res,
 		ServerSeq: body.ServerSeq,
 		LocalSeq:  body.LocalSeq,
-		EventType: body.EventType,
+		EventType: et,
 	}
 	var err error
-	if events, ok := this.events[body.EventType]; ok {
-		for _, method := range events {
-			args := this.parse(body.Bytes, int(body.BodyCount), method)
-			returnValues := method.function.Call(args)
-			errInter := returnValues[0].Interface()
-			if errInter != nil {
-				appendErr := errInter.(error)
-				if err != nil {
-					err = fmt.Errorf("%w,%w", err, appendErr)
-				} else {
-					err = appendErr
+	this.mutex.RLock()
+	var isHasFunc bool
+	for tp, funcs := range this.events {
+		if tp.Match(et) {
+			for _, method := range funcs {
+				args := this.parse(body.Bytes, int(body.BodyCount), method)
+				returnValues := method.function.Call(args)
+				errInter := returnValues[0].Interface()
+				if errInter != nil {
+					appendErr := errInter.(error)
+					if err != nil {
+						err = fmt.Errorf("%w,%w", err, appendErr)
+					} else {
+						err = appendErr
+					}
 				}
 			}
 		}
-	} else {
-		err = fmt.Errorf("has no eventType:%v", body.EventType)
+
 	}
-	if err != nil {
+	if !isHasFunc {
+		err = fmt.Errorf("has no func to do:%v", body.EventType)
+	} else if err != nil {
 		res.Error = err.Error()
 	}
+	this.mutex.RUnlock()
 	this.reqmutex.Lock()
 	defer this.reqmutex.Unlock()
 	err = codec.Write(res)
@@ -329,9 +338,24 @@ func (this *client) On(t msg.EventType, Func any) error {
 		argCount: inCount,
 	}
 	this.mutex.Lock()
-	events := this.events[t]
-	events = append(events, mType)
-	this.events[t] = events
+
+	var isExist bool
+	var methods []*method
+	var topic *msg.EventTopic
+	for tp, ev := range this.events {
+		if tp.Match(t) {
+			methods = append(ev, mType)
+			topic = tp
+			isExist = true
+			break
+		}
+	}
+	if isExist {
+		this.events[topic] = methods
+	} else {
+		methods = []*method{mType}
+		this.events[msg.NewEventTopic(t)] = methods
+	}
 	this.mutex.Unlock()
 	return this.emit(msg.MsgType_on, t)
 }

@@ -16,9 +16,9 @@ import (
 
 type server struct {
 	codecFunc options.CreateServerCodecFunc
-	mutex     sync.Mutex
+	mutex     sync.RWMutex
 	seq       uint64
-	monitor   map[msg.EventType]map[uint64]struct{}
+	monitor   map[*msg.EventTopic]map[uint64]struct{}
 	services  map[uint64]*service
 
 	reqTimeOut time.Duration //请求超时
@@ -41,7 +41,7 @@ type serverReqMeta struct {
 func NewServer(opts ...*options.ServerOptions) *server {
 	c := &server{
 		services:   map[uint64]*service{},
-		monitor:    map[msg.EventType]map[uint64]struct{}{},
+		monitor:    map[*msg.EventTopic]map[uint64]struct{}{},
 		reqTimeOut: 10,
 		reqMetas:   map[uint64]*serverReqMeta{},
 	}
@@ -80,7 +80,7 @@ func (this *server) Listen(url string) error {
 		}
 		this.mutex.Lock()
 		seq := this.seq
-		seq++
+		seq = incSeqID(seq)
 		this.seq = seq
 		service := newService(this, seq, codec)
 		this.services[this.seq] = service
@@ -140,59 +140,74 @@ func (this *server) handle(serviceID uint64, frame *msg.Msg) {
 
 }
 
-func (this *server) on(serviceID uint64, msg *msg.Msg) {
-	logrus.Info("server on ", serviceID, msg)
-	et := msg.EventType
+func (this *server) on(serviceID uint64, frame *msg.Msg) {
+	logrus.Info("server on ", serviceID, frame)
+	et := frame.EventType
 	if et == "" {
 		return
 	}
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
-	if v, ok := this.monitor[et]; ok {
-		v[serviceID] = struct{}{}
-	} else {
-		v = map[uint64]struct{}{serviceID: {}}
-		this.monitor[et] = v
+	var isExistET bool
+	for tp, sids := range this.monitor {
+		if tp.ET == et { //这里比较不能用equal
+			sids[serviceID] = struct{}{}
+			isExistET = true
+		}
 	}
-	err := this.writeWithoutLock(serviceID, msg)
+	if !isExistET {
+		v := map[uint64]struct{}{serviceID: {}}
+		this.monitor[msg.NewEventTopic(et)] = v
+	}
+	err := this.writeWithoutLock(serviceID, frame)
 	logrus.Error(err)
 }
 
-func (this *server) req(serviceID uint64, msg *msg.Msg) {
-	et := msg.EventType
+func (this *server) req(serviceID uint64, frame *msg.Msg) {
+	et := frame.EventType
 	if et == "" {
 		return
 	}
 	this.mutex.Lock()
 	reqSeq := incSeqID(this.reqSeq)
 	this.reqSeq = reqSeq
-	msg.ServerSeq = reqSeq
-	if v, ok := this.monitor[et]; ok {
+	frame.ServerSeq = reqSeq
+	this.mutex.Unlock()
+
+	this.mutex.RLock()
+	defer this.mutex.Unlock()
+	var isDone bool
+	var reqCount uint64
+
+	for tp, v := range this.monitor {
+		if tp.Match(et) {
+			for sid := range v {
+				if err := this.write(sid, frame); err == nil {
+					isDone = true
+					reqCount++
+				}
+			}
+		}
+	}
+
+	if isDone {
+		this.mutex.Lock()
+		reqMeta := &serverReqMeta{
+			senderID: serviceID,
+			reqSeq:   reqSeq,
+			reqCount: reqCount,
+			Time:     time.Now(),
+		}
+		this.reqMetas[reqSeq] = reqMeta
 		this.mutex.Unlock()
-		var isDone bool
-		var reqCount uint64
-		for sid := range v {
-			if err := this.write(sid, msg); err == nil {
-				isDone = true
-				reqCount++
-			}
-		}
-		if isDone {
-			this.mutex.Lock()
-			reqMeta := &serverReqMeta{
-				senderID: serviceID,
-				reqSeq:   reqSeq,
-				reqCount: reqCount,
-				Time:     time.Now(),
-			}
-			this.reqMetas[reqSeq] = reqMeta
-			logrus.Infof("broadcast:%+v\n", reqMeta)
-			this.mutex.Unlock()
-		}
 	} else {
-		this.mutex.Unlock()
+		frame.T = msg.MsgType_res
+		frame.Bytes = nil
+		frame.BodyCount = 0
+		this.write(serviceID, frame)
 	}
 }
+
 func (this *server) res(serviceID uint64, msg *msg.Msg) {
 	reqSeq := msg.ServerSeq
 	this.mutex.Lock()
