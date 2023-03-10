@@ -29,7 +29,7 @@ var errLocalWrite = errors.New("local Write err")
 type client struct {
 	name          string
 	url           string
-	reqmutex      sync.Mutex   // 保证流的正确性
+	writeMutex    sync.Mutex   // 保证流的正确性
 	mutex         sync.RWMutex // 保护client的状态
 	codecFunc     options.CreateClientCodecFunc
 	codec         codec.Codec
@@ -42,35 +42,25 @@ type client struct {
 	connecting    bool          // client is connecting
 }
 
-func Dial(url string, opts ...options.ClientOptions) (*client, error) {
+func Dial(url string, opts ...*options.ClientOptions) *client {
 	c := &client{
 		url:           url,
 		events:        make(map[*msg.EventTopic][]*method),
 		pending:       make(map[uint64]*msg.Call),
-		connecting:    true,
 		checkInterval: 1,
 		heartInterval: 5,
-	}
-	conn, err := net.Dial("tcp", url)
-	if err != nil {
-		return nil, err
 	}
 	//合并属性
 	opt := options.Client().SetCodecFunc(func(conn io.ReadWriteCloser) (codec.Codec, error) {
 		return codec.NewGobCodec(conn), nil
-	})
+	}).Merge(opts...)
 
 	//属性设置开始
 	if opt.Name != nil {
 		c.name = *opt.Name
 	}
-	var codec codec.Codec
 	if opt.CodecFunc != nil {
 		c.codecFunc = *opt.CodecFunc
-		codec, err = c.codecFunc(conn)
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	if opt.CheckInterval != nil {
@@ -84,21 +74,19 @@ func Dial(url string, opts ...options.ClientOptions) (*client, error) {
 	if opt.IsStopHeart != nil {
 		c.isStopHeart = *opt.IsStopHeart
 	}
-	//属性设置结束
-	if err := c.serve(codec); err != nil {
-		codec.Close()
-		return nil, err
-	}
 	go c.keepAlive()
-	return c, nil
+	return c
+}
 
+func (this *client) getConnecting() bool {
+	this.mutex.Lock()
+	defer this.mutex.Unlock()
+	return this.connecting
 }
 
 func (this *client) keepAlive() {
 	for {
-		this.mutex.Lock()
-		if !this.connecting {
-			this.mutex.Unlock()
+		if !this.getConnecting() {
 			conn, err := net.Dial("tcp", this.url)
 			if err != nil {
 				logrus.Errorf("dail err:%v\n", err)
@@ -117,15 +105,13 @@ func (this *client) keepAlive() {
 				continue
 			}
 		} else { //heart
-			this.mutex.Unlock()
 			if !this.isStopHeart {
 				if call := this.emit_async(msg.MsgType_ping, ""); call != nil {
-					if call.Error != nil { //这里是同步触发的错误
-						logrus.Error(call.Error)
-						if errors.Is(call.Error, io.ErrShortWrite) || errors.Is(call.Error, errLocalWrite) {
-							this.mutex.Lock()
-							this.stop()
-							this.mutex.Unlock()
+					err := call.Error
+					if err != nil { //这里是同步触发的错误
+						logrus.Error(err)
+						if errors.Is(err, io.ErrShortWrite) || errors.Is(err, errLocalWrite) {
+							this.stop(err)
 						}
 					}
 				}
@@ -153,13 +139,11 @@ func (this *client) serve(codec codec.Codec) (err error) {
 	}
 	if readFirstMsg.T == msg.MsgType_prepared {
 		//重连挂载已经有的event
-		this.mutex.RLock()
-		for event := range this.events {
-			if err = codec.Write(&msg.Msg{T: msg.MsgType_on, EventType: event.ET}); err != nil {
+		for tp := range this.events {
+			if err = codec.Write(&msg.Msg{T: msg.MsgType_on, EventType: tp.GetEventType()}); err != nil {
 				return
 			}
 		}
-		this.mutex.RUnlock()
 	}
 	this.connecting = true
 	this.codec = codec
@@ -168,8 +152,14 @@ func (this *client) serve(codec codec.Codec) (err error) {
 	return
 }
 
-func (this *client) stop() {
-	logrus.Error("stop")
+func (this *client) stop(err error) {
+	this.mutex.Lock()
+	defer this.mutex.Unlock()
+	for _, call := range this.pending {
+		call.Error = err
+		logrus.Errorf("%+v,err:%v", call.Msg, call.Error)
+		call.Do()
+	}
 	if this.connecting {
 		this.codec.Close()
 		this.codec = nil
@@ -201,12 +191,15 @@ func (this *client) input(codec codec.Codec) {
 			err = errors.New("reading error body1: " + err.Error())
 			break
 		}
-		logrus.Infof("client receive:%+v", gotMsg)
 		switch gotMsg.T {
-		case msg.MsgType_ping, msg.MsgType_pong:
+		case msg.MsgType_ping:
 		case msg.MsgType_req:
+			logrus.Infof("client receive:%+v", gotMsg)
 			go this.call(codec, &gotMsg)
-		case msg.MsgType_res, msg.MsgType_on:
+		case msg.MsgType_res, msg.MsgType_on, msg.MsgType_pong:
+			if gotMsg.T != msg.MsgType_pong {
+				logrus.Infof("client receive:%+v", gotMsg)
+			}
 			seq := gotMsg.LocalSeq
 			this.mutex.Lock()
 			call := this.pending[seq]
@@ -221,19 +214,8 @@ func (this *client) input(codec codec.Codec) {
 		default:
 		}
 	}
-	this.reqmutex.Lock()
-	this.mutex.Lock()
-	for _, call := range this.pending {
-		logrus.Infof("%+v", *call.Msg)
-		call.Error = err
-		call.Do()
-	}
-	if err != nil {
-		logrus.Error(err)
-	}
-	this.stop()
-	this.mutex.Unlock()
-	this.reqmutex.Unlock()
+	logrus.Errorf("read err:%+v", err)
+	this.stop(err)
 }
 
 func (this *client) parse(data []byte, argCount int, m *method) []reflect.Value {
@@ -261,12 +243,12 @@ func (this *client) parse(data []byte, argCount int, m *method) []reflect.Value 
 	return argsValue
 }
 
-func (this *client) call(codec codec.Codec, body *msg.Msg) {
-	et := body.EventType
+func (this *client) call(codec codec.Codec, req *msg.Msg) {
+	et := req.EventType
 	res := &msg.Msg{
 		T:         msg.MsgType_res,
-		ServerSeq: body.ServerSeq,
-		LocalSeq:  body.LocalSeq,
+		ServerSeq: req.ServerSeq,
+		LocalSeq:  req.LocalSeq,
 		EventType: et,
 	}
 	var err error
@@ -275,7 +257,8 @@ func (this *client) call(codec codec.Codec, body *msg.Msg) {
 	for tp, funcs := range this.events {
 		if tp.Match(et) {
 			for _, method := range funcs {
-				args := this.parse(body.Bytes, int(body.BodyCount), method)
+				isHasFunc = true
+				args := this.parse(req.Bytes, int(req.BodyCount), method)
 				returnValues := method.function.Call(args)
 				errInter := returnValues[0].Interface()
 				if errInter != nil {
@@ -291,19 +274,17 @@ func (this *client) call(codec codec.Codec, body *msg.Msg) {
 
 	}
 	if !isHasFunc {
-		err = fmt.Errorf("has no func to do:%v", body.EventType)
+		err = fmt.Errorf("has no func to do:%v", req.EventType)
 	} else if err != nil {
 		res.Error = err.Error()
 	}
 	this.mutex.RUnlock()
-	this.reqmutex.Lock()
-	defer this.reqmutex.Unlock()
+	this.writeMutex.Lock()
 	err = codec.Write(res)
+	this.writeMutex.Unlock()
 	if err != nil {
 		logrus.Error(err)
-		this.mutex.Lock()
-		defer this.mutex.Unlock()
-		this.stop()
+		this.stop(err)
 	}
 }
 
@@ -338,12 +319,11 @@ func (this *client) On(t msg.EventType, Func any) error {
 		argCount: inCount,
 	}
 	this.mutex.Lock()
-
 	var isExist bool
 	var methods []*method
 	var topic *msg.EventTopic
 	for tp, ev := range this.events {
-		if tp.Match(t) {
+		if tp.Equal(t) {
 			methods = append(ev, mType)
 			topic = tp
 			isExist = true
@@ -386,13 +366,11 @@ func (this *client) emit_async(t msg.MsgType, eventType msg.EventType, args ...a
 		return
 	}
 	m.Bytes = buf.Bytes()
-	fmt.Printf("emit_async:%+v\n", m)
 	this.send(call)
 	return
 }
 
 func (this *client) emit(t msg.MsgType, eventType msg.EventType, args ...any) error {
-	logrus.Info(t, eventType, args)
 	call := <-this.emit_async(t, eventType, args...).Done
 	return call.Error
 }
@@ -402,8 +380,6 @@ func (this *client) Emit(eventType msg.EventType, args ...any) error {
 }
 
 func (this *client) send(call *msg.Call) {
-	this.reqmutex.Lock()
-	defer this.reqmutex.Unlock()
 	var codec codec.Codec
 	this.mutex.Lock()
 	if !this.connecting {
@@ -419,7 +395,9 @@ func (this *client) send(call *msg.Call) {
 	this.seq = seq
 	this.mutex.Unlock()
 	call.Msg.LocalSeq = seq
+	this.writeMutex.Lock()
 	err := codec.Write(call.Msg)
+	this.writeMutex.Unlock()
 	if err != nil {
 		this.mutex.Lock()
 		call = this.pending[seq]

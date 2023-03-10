@@ -49,6 +49,13 @@ type Msg struct {
 	Error     string // error
 }
 
+func (this *Msg) String() string {
+	if this == nil {
+		return ""
+	}
+	return fmt.Sprintf("Msg:T:%v,ServerSeq:%d,LocalSeq:%d,Name:%s,EventType:%v,BodyCount:%d,Error:%v", this.T, this.ServerSeq, this.LocalSeq, this.Name, this.EventType, this.BodyCount, this.Error)
+}
+
 type Call struct {
 	Msg   *Msg
 	Done  chan *Call

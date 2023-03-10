@@ -2,6 +2,7 @@ package event
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -104,7 +105,7 @@ func (this *server) checkTimeOut() {
 					EventType: reqMeta.EventType,
 					Error:     errTimeout.Error(),
 				}
-				this.writeWithoutLock(reqMeta.senderID, gotMsg)
+				this.write(reqMeta.senderID, gotMsg)
 				delete(this.reqMetas, reqMeta.reqSeq)
 			}
 		}
@@ -114,26 +115,21 @@ func (this *server) checkTimeOut() {
 }
 
 func (this *server) close(id uint64) {
-	this.mutex.Lock()
-	defer this.mutex.Unlock()
 	for _, m := range this.monitor {
 		delete(m, id)
 	}
-	if service, ok := this.services[id]; ok {
-		delete(this.services, id)
-		service.close()
-	}
+	delete(this.services, id)
 }
 
 // case msgType_on, msgType_req, msgType_res:
-func (this *server) handle(serviceID uint64, frame *msg.Msg) {
+func (this *server) handle(serviceID uint64, serviceName string, frame *msg.Msg) {
 	switch frame.T {
 	case msg.MsgType_on:
 		this.on(serviceID, frame)
 	case msg.MsgType_req:
 		this.req(serviceID, frame)
 	case msg.MsgType_res:
-		this.res(serviceID, frame)
+		this.res(serviceID, serviceName, frame)
 	default:
 		logrus.Infof("丢弃：%d,msg:%+v\n", serviceID, frame)
 	}
@@ -150,7 +146,7 @@ func (this *server) on(serviceID uint64, frame *msg.Msg) {
 	defer this.mutex.Unlock()
 	var isExistET bool
 	for tp, sids := range this.monitor {
-		if tp.ET == et { //这里比较不能用equal
+		if tp.Equal(et) { //这里比较不能用equal
 			sids[serviceID] = struct{}{}
 			isExistET = true
 		}
@@ -159,8 +155,10 @@ func (this *server) on(serviceID uint64, frame *msg.Msg) {
 		v := map[uint64]struct{}{serviceID: {}}
 		this.monitor[msg.NewEventTopic(et)] = v
 	}
-	err := this.writeWithoutLock(serviceID, frame)
-	logrus.Error(err)
+	if err := this.write(serviceID, frame); err != nil {
+		logrus.Error(err)
+		this.close(serviceID)
+	}
 }
 
 func (this *server) req(serviceID uint64, frame *msg.Msg) {
@@ -169,29 +167,43 @@ func (this *server) req(serviceID uint64, frame *msg.Msg) {
 		return
 	}
 	this.mutex.Lock()
-	reqSeq := incSeqID(this.reqSeq)
+	reqSeq := this.reqSeq
+	reqSeq = incSeqID(reqSeq)
 	this.reqSeq = reqSeq
 	frame.ServerSeq = reqSeq
 	this.mutex.Unlock()
-
 	this.mutex.RLock()
-	defer this.mutex.Unlock()
 	var isDone bool
 	var reqCount uint64
-
+	var needDeleteServiceID []uint64
 	for tp, v := range this.monitor {
 		if tp.Match(et) {
 			for sid := range v {
 				if err := this.write(sid, frame); err == nil {
 					isDone = true
 					reqCount++
+				} else {
+					needDeleteServiceID = append(needDeleteServiceID, sid)
 				}
 			}
 		}
 	}
+	if !isDone {
+		frame.T = msg.MsgType_res
+		frame.Bytes = nil
+		frame.BodyCount = 0
+		if err := this.write(serviceID, frame); err != nil {
+			needDeleteServiceID = append(needDeleteServiceID, serviceID)
+		}
+	}
+	this.mutex.RUnlock()
 
+	this.mutex.Lock()
+	defer this.mutex.Unlock()
+	for _, sid := range needDeleteServiceID {
+		this.close(sid)
+	}
 	if isDone {
-		this.mutex.Lock()
 		reqMeta := &serverReqMeta{
 			senderID: serviceID,
 			reqSeq:   reqSeq,
@@ -199,16 +211,10 @@ func (this *server) req(serviceID uint64, frame *msg.Msg) {
 			Time:     time.Now(),
 		}
 		this.reqMetas[reqSeq] = reqMeta
-		this.mutex.Unlock()
-	} else {
-		frame.T = msg.MsgType_res
-		frame.Bytes = nil
-		frame.BodyCount = 0
-		this.write(serviceID, frame)
 	}
 }
 
-func (this *server) res(serviceID uint64, msg *msg.Msg) {
+func (this *server) res(serviceID uint64, serviceName string, msg *msg.Msg) {
 	reqSeq := msg.ServerSeq
 	this.mutex.Lock()
 	reqMeta, ok := this.reqMetas[reqSeq]
@@ -218,17 +224,19 @@ func (this *server) res(serviceID uint64, msg *msg.Msg) {
 		if msg.Error != "" {
 			reqMeta.existErr = true
 		}
-		reqMeta.errs = append(reqMeta.errs, msg.Error)
+		reqMeta.errs = append(reqMeta.errs, fmt.Sprintf("name:%s,err:%s", serviceName, msg.Error))
 		logrus.Infof("server receive %+v,meta:%+v", msg, reqMeta)
 		this.mutex.Unlock()
 		if leftCount == 0 { //res
 			if reqMeta.existErr {
 				msg.Error = strings.Join(reqMeta.errs, "|")
 			}
-			if err := this.write(reqMeta.senderID, msg); err != nil {
-				logrus.Error("res senderID:%d,msg:%+v", reqMeta.senderID, msg)
-			}
+			err := this.write(reqMeta.senderID, msg)
 			this.mutex.Lock()
+			if err != nil {
+				logrus.Error("res senderID:%d,msg:%+v", reqMeta.senderID, msg)
+				this.close(serviceID)
+			}
 			delete(this.reqMetas, reqSeq)
 			this.mutex.Unlock()
 		}
@@ -238,29 +246,9 @@ func (this *server) res(serviceID uint64, msg *msg.Msg) {
 }
 
 func (this *server) write(serviceID uint64, msg *msg.Msg) (err error) {
-	this.mutex.Lock()
 	if service, ok := this.services[serviceID]; ok {
-		this.mutex.Unlock()
 		if err = service.write(msg); err == nil {
 			return
-		} else {
-			this.close(serviceID)
-		}
-	} else {
-		//err = fmt.Errorf("serviceID:%d is not exits", serviceID)
-		this.mutex.Unlock()
-	}
-	return
-}
-
-func (this *server) writeWithoutLock(serviceID uint64, msg *msg.Msg) (err error) {
-	if service, ok := this.services[serviceID]; ok {
-		logrus.Info("write", msg)
-		if err = service.write(msg); err == nil {
-			logrus.Info("write1", msg)
-			return
-		} else {
-			this.close(serviceID)
 		}
 	}
 	return
@@ -282,6 +270,7 @@ func newService(server *server, id uint64, codec codec.Codec) *service {
 		id:     id,
 		server: server,
 		codec:  codec,
+		done:   make(chan struct{}),
 	}
 	return s
 }
@@ -294,6 +283,7 @@ func (this *service) serve() {
 	var firstFrame msg.Msg
 	if err = this.read(&firstFrame); err == nil {
 		//TODO varify
+		fmt.Println("setname:", firstFrame.Name)
 		this.name = firstFrame.Name
 	}
 	err = this.write(&msg.Msg{T: msg.MsgType_prepared})
@@ -307,12 +297,15 @@ func (this *service) serve() {
 			if err != nil {
 				continue
 			}
-			logrus.Infof("receive msg:%+v\n", frame)
 			switch frame.T {
 			case msg.MsgType_ping:
-				err = this.write(&msg.Msg{T: msg.MsgType_pong})
+				retFrame := &msg.Msg{T: msg.MsgType_pong, ServerSeq: frame.ServerSeq, LocalSeq: frame.LocalSeq}
+				err = this.write(retFrame)
+				logrus.Infof("pone:name:%v,%+v", this.name, retFrame)
+
 			case msg.MsgType_on, msg.MsgType_req, msg.MsgType_res:
-				go this.server.handle(this.id, &frame)
+				logrus.Infof("receive msg:%+v\n", frame)
+				go this.server.handle(this.id, this.name, &frame)
 			default:
 				logrus.Infof("invalid msg:%+v", frame)
 			}
@@ -337,6 +330,7 @@ func (this *service) write(msg *msg.Msg) error {
 	if err != nil {
 		logrus.Error(err)
 		close(this.done)
+		this.close()
 	}
 	return err
 }
