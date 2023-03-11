@@ -9,7 +9,8 @@ import (
 type EventType string
 
 func (this EventType) isRegexp() bool {
-	return strings.HasPrefix(string(this), "//")
+	s := string(this)
+	return strings.HasPrefix(s, "/") && strings.HasSuffix(s, "/")
 }
 
 // 引入这个概念是为了推广正则,有了正则就不用拓展组
@@ -23,8 +24,10 @@ func NewEventTopic(et EventType) *EventTopic {
 	s := &EventTopic{
 		et: et,
 	}
+	str := string(et)
+	length := len(str)
 	if et.isRegexp() {
-		s.reg = regexp.MustCompile(string(et)[2:])
+		s.reg = regexp.MustCompile(str[1 : length-1])
 		s.isRegexp = true
 	}
 	return s

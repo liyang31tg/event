@@ -263,6 +263,7 @@ func (this *client) call(codec codec.Codec, req *msg.Msg) {
 				errInter := returnValues[0].Interface()
 				if errInter != nil {
 					appendErr := errInter.(error)
+					appendErr = fmt.Errorf("[topic:%v,event:%s,err:%v]", tp.GetEventType(), et, appendErr)
 					if err != nil {
 						err = fmt.Errorf("%w,%w", err, appendErr)
 					} else {
@@ -271,7 +272,6 @@ func (this *client) call(codec codec.Codec, req *msg.Msg) {
 				}
 			}
 		}
-
 	}
 	if !isHasFunc {
 		err = fmt.Errorf("has no func to do:%v", req.EventType)

@@ -29,6 +29,9 @@ func (this *ServerOptions) merge(opt *ServerOptions) {
 	if opt.CodecFunc != nil {
 		this.CodecFunc = opt.CodecFunc
 	}
+	if opt.ReqTimeout != nil {
+		this.ReqTimeout = opt.ReqTimeout
+	}
 }
 
 func (this *ServerOptions) SetCodecFunc(cf CreateServerCodecFunc) *ServerOptions {
