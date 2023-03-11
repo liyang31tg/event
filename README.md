@@ -1,7 +1,7 @@
 ### 基于观察者模式
 > 解决多服务器的配置文件检查问题
 
-#### useage
+#### usage
 1. 启动服务器
 ```go
 event.NewServer().Listen(":8080")
