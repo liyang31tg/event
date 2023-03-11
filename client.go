@@ -211,7 +211,6 @@ func (this *client) input(codec codec.Codec) {
 				}
 				call.Do()
 			}
-		default:
 		}
 	}
 	logrus.Errorf("read err:%+v", err)
@@ -254,31 +253,38 @@ func (this *client) call(codec codec.Codec, req *msg.Msg) {
 	var err error
 	this.mutex.RLock()
 	var isHasFunc bool
+	var doMethods = map[*msg.EventTopic]*method{}
 	for tp, funcs := range this.events {
 		if tp.Match(et) {
 			for _, method := range funcs {
 				isHasFunc = true
-				args := this.parse(req.Bytes, int(req.BodyCount), method)
-				returnValues := method.function.Call(args)
-				errInter := returnValues[0].Interface()
-				if errInter != nil {
-					appendErr := errInter.(error)
-					appendErr = fmt.Errorf("[topic:%v,event:%s,err:%v]", tp.GetEventType(), et, appendErr)
-					if err != nil {
-						err = fmt.Errorf("%w,%w", err, appendErr)
-					} else {
-						err = appendErr
-					}
-				}
+				doMethods[tp] = method
 			}
 		}
 	}
+	this.mutex.RUnlock()
+
 	if !isHasFunc {
 		err = fmt.Errorf("has no func to do:%v", req.EventType)
-	} else if err != nil {
-		res.Error = err.Error()
+	} else {
+		for tp, method := range doMethods {
+			args := this.parse(req.Bytes, int(req.BodyCount), method)
+			returnValues := method.function.Call(args)
+			errInter := returnValues[0].Interface()
+			if errInter != nil {
+				appendErr := errInter.(error)
+				appendErr = fmt.Errorf("[topic:%v,event:%s,err:%v]", tp.GetEventType(), et, appendErr)
+				if err != nil {
+					err = fmt.Errorf("%w,%w", err, appendErr)
+				} else {
+					err = appendErr
+				}
+			}
+		}
+		if err != nil {
+			res.Error = err.Error()
+		}
 	}
-	this.mutex.RUnlock()
 	this.writeMutex.Lock()
 	err = codec.Write(res)
 	this.writeMutex.Unlock()

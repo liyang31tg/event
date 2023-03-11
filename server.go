@@ -96,7 +96,6 @@ func (this *server) checkTimeOut() {
 	for {
 		this.mutex.Lock()
 		for _, reqMeta := range this.reqMetas {
-			logrus.Infof("%+v\n", reqMeta)
 			if time.Now().Sub(reqMeta.Time) > this.reqTimeOut*time.Second { //
 				gotMsg := &msg.Msg{
 					T:         msg.MsgType_res,
@@ -105,6 +104,7 @@ func (this *server) checkTimeOut() {
 					EventType: reqMeta.EventType,
 					Error:     errTimeout.Error(),
 				}
+				logrus.Errorf("remove req:%+v", gotMsg)
 				delete(this.reqMetas, reqMeta.reqSeq)
 				if err := this.write(reqMeta.senderID, gotMsg); err != nil {
 					this.close(reqMeta.senderID)
